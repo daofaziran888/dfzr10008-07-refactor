@@ -1,8 +1,20 @@
-"""API接口生成业务规则：状态流转、字段校验与筛选口径都收在这里。"""
+"""API接口生成业务规则：状态流转、字段校验与筛选口径都收在这里。
+
+接口配置只保存对模型封装冻结版本的引用（`冻结版本编号`），字段映射与聚合口径
+统一通过 `frozen.read_entry_view` 从冻结版本读取，不再保留聚合规则副本。
+"""
 from __future__ import annotations
 
 from typing import Any
 
+from app.services.frozen import (
+    FrozenReferenceError,
+    VERSION_FIELD,
+    freeze_reference_error,
+    read_entry_view,
+    read_entry_views,
+    update_reference_entry,
+)
 from app.store import store
 
 MODULE = "apigen"
@@ -28,23 +40,30 @@ class ApigenService:
             rows = [row for row in rows if row.get("status") == status]
         total = len(rows)
         start = max(page - 1, 0) * size
-        return rows[start:start + size], total
+        return read_entry_views(rows[start:start + size]), total
 
     def get_entry(self, entry_id: int) -> dict[str, Any] | None:
-        return store.find(MODULE, entry_id)
+        return read_entry_view(store.find(MODULE, entry_id))
 
     def create_entry(self, values: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
         missing = [field for field in REQUIRED_FIELDS if not str(values.get(field) or "").strip()]
         if missing:
             return None, missing
+        reference_error = freeze_reference_error(values)
+        if reference_error:
+            raise FrozenReferenceError(reference_error)
         rows = store.rows(MODULE)
         entry = {"id": max((int(row.get("id", 0)) for row in rows), default=0) + 1}
         entry.update({field: values.get(field) for field in REQUIRED_FIELDS})
         entry["status"] = STATUS_ORDER[0]
         entry["pending"] = True
         entry["abnormal"] = False
+        version_id = str(values.get(VERSION_FIELD) or "").strip()
+        if version_id:
+            # 只存引用，不复制聚合口径：下游读到的始终是冻结版本里的那一份。
+            entry[VERSION_FIELD] = version_id
         rows.append(entry)
-        return entry, []
+        return read_entry_view(entry), []
 
     def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
         entry = store.find(MODULE, entry_id)
@@ -58,4 +77,11 @@ class ApigenService:
         entry["status"] = target
         entry["pending"] = target != STATUS_ORDER[-1]
         entry["abnormal"] = action in NEGATIVE_ACTIONS
-        return entry, f"接口配置已{action}"
+        return read_entry_view(entry), f"接口配置已{action}"
+
+    def update_entry(self, entry_id: int, values: dict[str, Any]) -> dict[str, Any] | None:
+        """编辑接口配置：只改自身字段或重新指定冻结版本，口径仍从快照读取。"""
+        entry = store.find(MODULE, entry_id)
+        if entry is None:
+            return None
+        return update_reference_entry(entry, values)

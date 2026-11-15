@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas import ActionResult, EntryPayload, PageResult
+from app.services.frozen import FrozenReferenceError, frozen_version_payload
 from app.services.product import ProductService
 
 router = APIRouter(prefix="/api/product", tags=["数据产品定义"])
@@ -30,9 +31,25 @@ def list_entries(
     return PageResult(items=items, total=total, page=page, size=size)
 
 
+@router.get("/frozen/{version_id}")
+def get_frozen_version(version_id: str) -> dict[str, Any]:
+    """按冻结版本号读取被引用的发布结果；历史口径只读。"""
+    snapshot = frozen_version_payload(version_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail=f"冻结版本 {version_id} 不存在或已归档")
+    return snapshot
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出数据产品定义清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "product", "total": total, "items": items}
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
-    """读取单条数据产品明细；不存在时给出可读的错误说明。"""
+    """读取单条数据产品明细；引用冻结版本时返回该版本的字段映射与聚合口径。"""
     entry = service.get_entry(entry_id)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"数据产品 {entry_id} 不存在或已归档")
@@ -42,10 +59,25 @@ def get_entry(entry_id: int) -> dict:
 @router.post("", response_model=ActionResult)
 def create_entry(payload: EntryPayload) -> ActionResult:
     """登记一条数据产品，缺字段时说明原因而不是静默丢弃。"""
-    entry, missing = service.create_entry(payload.values)
+    try:
+        entry, missing = service.create_entry(payload.values)
+    except FrozenReferenceError as error:
+        return ActionResult(ok=False, message=str(error))
     if missing:
         return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
     return ActionResult(ok=True, message="数据产品已登记", entry=entry)
+
+
+@router.put("/{entry_id}", response_model=ActionResult)
+def update_entry(entry_id: int, payload: EntryPayload) -> ActionResult:
+    """编辑数据产品定义：可重新指定冻结版本，字段映射与聚合口径始终按快照读取。"""
+    try:
+        entry = service.update_entry(entry_id, payload.values)
+    except FrozenReferenceError as error:
+        return ActionResult(ok=False, message=str(error))
+    if entry is None:
+        return ActionResult(ok=False, message=f"数据产品 {entry_id} 不存在或已归档")
+    return ActionResult(ok=True, message="数据产品已更新", entry=entry)
 
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
@@ -56,10 +88,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出数据产品定义清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "product", "total": total, "items": items}

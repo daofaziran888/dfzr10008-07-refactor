@@ -1,8 +1,20 @@
-"""数据产品定义业务规则：状态流转、字段校验与筛选口径都收在这里。"""
+"""数据产品定义业务规则：状态流转、字段校验与筛选口径都收在这里。
+
+数据产品只保存对模型封装冻结版本的引用（`冻结版本编号`），详情读取统一走
+`frozen.read_entry_view`，按冻结版本展示字段映射与聚合口径。
+"""
 from __future__ import annotations
 
 from typing import Any
 
+from app.services.frozen import (
+    FrozenReferenceError,
+    VERSION_FIELD,
+    freeze_reference_error,
+    read_entry_view,
+    read_entry_views,
+    update_reference_entry,
+)
 from app.store import store
 
 MODULE = "product"
@@ -28,23 +40,30 @@ class ProductService:
             rows = [row for row in rows if row.get("status") == status]
         total = len(rows)
         start = max(page - 1, 0) * size
-        return rows[start:start + size], total
+        return read_entry_views(rows[start:start + size]), total
 
     def get_entry(self, entry_id: int) -> dict[str, Any] | None:
-        return store.find(MODULE, entry_id)
+        return read_entry_view(store.find(MODULE, entry_id))
 
     def create_entry(self, values: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
         missing = [field for field in REQUIRED_FIELDS if not str(values.get(field) or "").strip()]
         if missing:
             return None, missing
+        reference_error = freeze_reference_error(values)
+        if reference_error:
+            raise FrozenReferenceError(reference_error)
         rows = store.rows(MODULE)
         entry = {"id": max((int(row.get("id", 0)) for row in rows), default=0) + 1}
         entry.update({field: values.get(field) for field in REQUIRED_FIELDS})
         entry["status"] = STATUS_ORDER[0]
         entry["pending"] = True
         entry["abnormal"] = False
+        version_id = str(values.get(VERSION_FIELD) or "").strip()
+        if version_id:
+            # 数据产品定义按冻结版本引用，不复制字段映射与聚合口径。
+            entry[VERSION_FIELD] = version_id
         rows.append(entry)
-        return entry, []
+        return read_entry_view(entry), []
 
     def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
         entry = store.find(MODULE, entry_id)
@@ -58,4 +77,11 @@ class ProductService:
         entry["status"] = target
         entry["pending"] = target != STATUS_ORDER[-1]
         entry["abnormal"] = action in NEGATIVE_ACTIONS
-        return entry, f"数据产品已{action}"
+        return read_entry_view(entry), f"数据产品已{action}"
+
+    def update_entry(self, entry_id: int, values: dict[str, Any]) -> dict[str, Any] | None:
+        """编辑数据产品定义：可重新指定冻结版本，字段映射始终按快照读取。"""
+        entry = store.find(MODULE, entry_id)
+        if entry is None:
+            return None
+        return update_reference_entry(entry, values)

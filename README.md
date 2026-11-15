@@ -73,5 +73,20 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 发布结果与冻结版本
+
+模型封装（`datapack`）的发布结果是唯一的冻结来源，共用逻辑在
+`backend/app/services/frozen.py`：
+
+- 发布封装时把当时的字段映射、聚合规则等结果写入冻结版本表（`store.frozen_version`），
+  版本号形如 `DATA-0003-V2`；冻结版本只增不改，读取返回深拷贝。
+- 已发布记录只读：编辑走 `PUT /api/datapack/{id}`（或 `POST .../revisions`）时只生成
+  新版本草稿，旧记录、旧快照与下游引用都不变；新版本再次发布才生成 `-V2` 快照。
+- 接口配置（`apigen`）与数据产品定义（`product`）只保存 `冻结版本编号` 引用，不复制聚合口径；
+  详情与列表都通过同一份 `read_entry_view` 读取，因此展示的字段映射与聚合口径与模型封装一致。
+- 按版本号查看历史口径：`GET /api/{datapack,apigen,product}/frozen/{version_id}`。
+
+回归测试：`cd backend && .venv/bin/python -m unittest discover -s tests`。
+
 领域：数据工程
 子方向：数据分析与数据应用

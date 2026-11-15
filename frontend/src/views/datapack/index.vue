@@ -47,6 +47,7 @@
             >
               {{ action }}
             </button>
+            <button class="link" type="button" @click="openRevision(row)">编辑</button>
           </td>
         </tr>
         <tr v-if="!rows.length">
@@ -59,6 +60,22 @@
       <span>共 {{ total }} 条数据模型封装记录</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
+
+    <section v-if="revision" class="revision-panel">
+      <h3>编辑封装 {{ revision.封装编号 }}</h3>
+      <p class="page-desc">
+        已发布封装的字段映射与聚合口径已冻结为版本 {{ revision.冻结版本编号 ?? '—' }}；
+        保存只生成新版本草稿，历史发布结果与下游引用保持只读。
+      </p>
+      <label v-for="field in revisionFields" :key="field" class="filter-item">
+        <span>{{ field }}</span>
+        <input v-model="revisionDraft[field]" :placeholder="`请输入${field}`" />
+      </label>
+      <div class="row-actions">
+        <button class="btn primary" type="button" @click="submitRevision">生成新版本</button>
+        <button class="btn ghost" type="button" @click="revision = null">取消</button>
+      </div>
+    </section>
   </section>
 </template>
 
@@ -80,6 +97,10 @@ const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
+// 冻结字段：编辑已发布封装时只作为新版本草稿的初始值，保存后生成新版本。
+const revisionFields = ["字段映射", "聚合规则"]
+const revision = ref<Row | null>(null)
+const revisionDraft = ref<Record<string, string>>({})
 
 function resetFilters() {
   filters.value = {}
@@ -92,6 +113,33 @@ function exportRows() {
 
 function openCreate() {
   errorMessage.value = '模型封装登记入口尚未接入审批流'
+}
+
+function openRevision(row: Row) {
+  errorMessage.value = ''
+  revision.value = row
+  revisionDraft.value = Object.fromEntries(
+    revisionFields.map((field) => [field, String(row[field] ?? '')]),
+  )
+}
+
+async function submitRevision() {
+  if (!revision.value) return
+  errorMessage.value = ''
+  try {
+    const response = await request(`${ENDPOINT}/${revision.value.id}/revisions`, {
+      method: 'POST',
+      body: JSON.stringify({ values: revisionDraft.value }),
+    })
+    const payload = await response.json()
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.message ?? '模型封装新版本生成失败')
+    }
+    revision.value = null
+    await reload()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '模型封装新版本生成失败'
+  }
 }
 
 async function runAction(action: string, row: Row) {
